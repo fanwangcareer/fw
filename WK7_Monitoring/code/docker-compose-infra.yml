@@ -1,0 +1,98 @@
+version: "2"
+
+volumes:
+  prometheus_data: {}
+  grafana_data: {}
+  postgres_data: {}  # Volume to persist PostgreSQL data
+
+services:
+  statsd:
+    image: prom/statsd-exporter
+    container_name: statsd
+    ports:
+      - "9102:9102"
+      - "9125:9125/udp"
+
+  prometheus:
+    image: prom/prometheus
+    container_name: prometheus
+    volumes:
+      - ./config/prometheus/:/etc/prometheus/
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    expose:
+      - 9090
+    ports:
+      - "9090:9090"
+    depends_on:
+      - postgres-exporter  # Ensure Prometheus starts after the exporter is ready
+
+  node-exporter:
+    image: prom/node-exporter
+    expose:
+      - "9100"
+    ports:
+      - "9100:9100"
+
+  grafana:
+    image: grafana/grafana
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=foobar
+      - GF_USERS_ALLOW_SIGN_UP=false
+
+  datadog:
+    image: gcr.io/datadoghq/agent:latest
+    environment:
+      - DD_API_KEY=${DD_API_KEY}
+      - DD_APM_ENABLED=true
+      - DD_LOGS_ENABLED=true
+      - DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL=false  # Disable global log collection
+      - DD_LOGS_CONFIG_LABELS=true                  # Enable log collection based on labels
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./config/datadog/postgres.d/conf.yaml:/etc/datadog-agent/conf.d/postgres.d/conf.yaml
+    depends_on:
+      - postgres
+    ports:
+      - "8126:8126"  # APM agent port
+    networks:
+      - default
+
+  postgres:
+    image: postgres:latest
+    container_name: postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init_db:/docker-entrypoint-initdb.d  # Mount folder for initialization scripts
+    environment:
+      - POSTGRES_DB=postgres
+      - POSTGRES_USER=root
+      - POSTGRES_PASSWORD=changeme
+    ports:
+      - "5432:5432"
+    command: >
+      postgres
+      -c shared_preload_libraries=pg_stat_statements
+      -c track_activity_query_size=4096
+      -c pg_stat_statements.track=ALL
+      -c pg_stat_statements.max=10000
+      -c pg_stat_statements.track_utility=off
+      -c track_io_timing=on
+
+  postgres-exporter:
+    image: wrouesnel/postgres_exporter
+    container_name: postgres-exporter
+    environment:
+      DATA_SOURCE_NAME: "postgresql://root:changeme@postgres:5432/postgres?sslmode=disable"
+    ports:
+      - "9187:9187"
+    depends_on:
+      - postgres
